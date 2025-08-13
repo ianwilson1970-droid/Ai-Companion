@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Charlie – Companion</title>
+  <link rel="stylesheet" href="charlie.css" />
+  <style>
+    /* Minimal safe defaults if charlie.css not present */
+    :root { --bg:#111; --fg:#f7f7f7; --accent:#4ade80; }
+    body { background:var(--bg); color:var(--fg); font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    .wrap { max-width: 720px; margin: 0 auto; padding: 24px; }
+    h1 { font-size: 2rem; margin: 0 0 8px; }
+    .sub { opacity:.8; margin-bottom: 16px; }
+    .cards { display:grid; gap:12px; grid-template-columns: 1fr; }
+    .card { background:#1a1a1a; border-radius:16px; padding:16px; box-shadow: 0 2px 12px rgba(0,0,0,.3); }
+    .controls { display:flex; gap:12px; flex-wrap:wrap; }
+    button { font-size: 1.2rem; padding: 16px 20px; border-radius: 999px; border: none; background: var(--accent); color:#052e14; cursor:pointer; }
+    button[disabled] { opacity:.5; cursor:not-allowed; }
+    .big { font-size:1.4rem; padding:20px 28px; }
+    .chat { max-height: 52vh; overflow:auto; padding-right: 6px; }
+    .msg { margin:12px 0; line-height:1.5; }
+    .you { text-align:right; }
+    .bubble { display:inline-block; padding:12px 14px; border-radius:16px; }
+    .you .bubble { background:#2d2d2d; }
+    .ai .bubble { background:#0d4022; }
+    .sr-only{ position:absolute; left:-10000px; top:auto; width:1px; height:1px; overflow:hidden; }
+    label { display:block; margin:6px 0 4px; }
+    input, select, textarea { width:100%; padding:12px; border-radius:12px; border:1px solid #333; background:#121212; color:#eee; }
+  </style>
+  <!-- Client-only LLM (WebLLM). Falls back to API proxy if selected. -->
+  <script defer src="https://unpkg.com/@mlc-ai/web-llm/dist/web-llm.min.js"></script>
+</head>
+<body>
+  <div class="wrap" role="main">
+    <h1>Talk to Charlie</h1>
+    <p class="sub">A friendly companion. Big buttons, clear voice. Works in your browser.</p>
+
+    <div class="card">
+      <div class="controls" aria-label="Primary controls">
+        <button id="btnTalk" class="big">🎤 Hold to Talk</button>
+        <button id="btnSpeak" class="big">🔊 Read Reply</button>
+        <button id="btnStop">⏹ Stop</button>
+        <select id="backend">
+          <option value="webllm">Client‑only (WebLLM)</option>
+          <option value="proxy">API via Proxy</option>
+        </select>
+      </div>
+      <div class="controls" style="margin-top:8px">
+        <button id="btnQuick1">News headline</button>
+        <button id="btnQuick2">Tell me a joke</button>
+        <button id="btnQuick3">Remind me tablets at 8pm</button>
+      </div>
+    </div>
+
+    <div class="card chat" id="chat" aria-live="polite" aria-atomic="false"></div>
+
+    <div class="card">
+      <label for="voice">Voice</label>
+      <select id="voice"></select>
+      <label for="rate">Speech speed</label>
+      <input id="rate" type="range" min="0.6" max="1.4" step="0.05" value="1" />
+    </div>
+
+    <div class="card">
+      <label for="memory">Long‑term memory (stored on this device only)</label>
+      <textarea id="memory" rows="5" placeholder="e.g., Grandkids: Lily (6), Max (9). Team: Ipswich Town."></textarea>
+      <button id="saveMem">Save Memory</button>
+    </div>
+  </div>
+
+<script>
+// ===== Accessibility & Utilities =====
+const chatEl = document.getElementById('chat');
+const backendSel = document.getElementById('backend');
+const memEl = document.getElementById('memory');
+const rateEl = document.getElementById('rate');
+const voiceSel = document.getElementById('voice');
+let selectedVoice = null;
+
+function addMsg(role, text){
+  const row = document.createElement('div');
+  row.className = `msg ${role}`;
+  const b = document.createElement('div');
+  b.className = 'bubble';
+  b.textContent = text;
+  row.appendChild(b);
+  chatEl.appendChild(row);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function loadMemory(){
+  memEl.value = localStorage.getItem('charlie_mem') || '';
+}
+function saveMemory(){
+  localStorage.setItem('charlie_mem', memEl.value || '');
+  addMsg('ai','Memory saved on this device.');
+}
+
+// ===== Persona =====
+const SYSTEM_PROMPT = `You are Charlie, a warm, witty UK companion for an older adult. Speak simply, one idea per sentence. Offer two choices. Encourage hydration and gentle movement. Never ask for passwords or financial info. Avoid medical advice. Use details from MEMORY if helpful.
+MEMORY:\n`;
+
+// ===== Speech Synthesis =====
+function populateVoices(){
+  const voices = speechSynthesis.getVoices();
+  voiceSel.innerHTML = '';
+  voices.forEach((v,i)=>{
+    const opt = document.createElement('option');
+    opt.value = i; opt.textContent = `${v.name} (${v.lang})`;
+    voiceSel.appendChild(opt);
+  });
+  selectedVoice = voices.find(v=>/UK|en-GB/i.test(v.lang)) || voices[0];
+  if(selectedVoice){ voiceSel.value = voices.indexOf(selectedVoice); }
+}
+
+speechSynthesis.onvoiceschanged = populateVoices;
+window.addEventListener('load', populateVoices);
+
+function speak(text){
+  if(!text) return;
+  const u = new SpeechSynthesisUtterance(text);
+  const voices = speechSynthesis.getVoices();
+  selectedVoice = voices[voiceSel.value] || selectedVoice || voices[0];
+  u.voice = selectedVoice; u.rate = parseFloat(rateEl.value||'1');
+  speechSynthesis.cancel();
+  speechSynthesis.speak(u);
+}
+
+// ===== Speech Recognition (Web Speech API) =====
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognizer = null;
+if(SR){
+  recognizer = new SR();
+  recognizer.lang = 'en-GB';
+  recognizer.interimResults = false; recognizer.maxAlternatives = 1;
+} else {
+  addMsg('ai','Speech recognition not available in this browser. Type instead.');
+}
+
+// Hold-to-talk UX
+const btnTalk = document.getElementById('btnTalk');
+let holding = false;
+
+function startRec(){ if(!recognizer) return; recognizer.start(); }
+function stopRec(){ if(!recognizer) return; recognizer.stop(); }
+
+btnTalk.addEventListener('mousedown', ()=>{ holding=true; startRec(); });
+btnTalk.addEventListener('touchstart', (e)=>{ holding=true; e.preventDefault(); startRec(); }, {passive:false});
+
+['mouseup','mouseleave','touchend','touchcancel'].forEach(ev=>{
+  btnTalk.addEventListener(ev, ()=>{ if(holding){ holding=false; stopRec(); } });
+});
+
+// ===== Backends =====
+// A) Client‑only via WebLLM
+let webllmEngine = null;
+async function ensureWebLLM(){
+  if(webllmEngine) return webllmEngine;
+  const { CreateWebWorkerMLCEngine } = window.webllm;
+  // small model for wider device support; users can upgrade
+  webllmEngine = await CreateWebWorkerMLCEngine(
+    new Worker('https://unpkg.com/@mlc-ai/web-llm/dist/worker.js', { type: 'module' }),
+    { model: 'Llama-3.1-8B-Instruct-q4f16_1-MLC', wasmProxy: true }
+  );
+  return webllmEngine;
+}
+
+async function chatWebLLM(userText){
+  const engine = await ensureWebLLM();
+  const memory = localStorage.getItem('charlie_mem') || '';
+  const sys = SYSTEM_PROMPT + memory;
+  const prompt = `${sys}\nUser: ${userText}\nAssistant:`;
+  const chunks = await engine.chat.completions.create({ messages:[
+    { role:'system', content: sys },
+    { role:'user', content: userText }
+  ], temperature:0.6, max_tokens: 220 });
+  // web-llm returns full text in a single object here
+  return chunks.choices?.[0]?.message?.content || 'Sorry, I got stuck.';
+}
+
+// B) API via Proxy (Cloudflare Worker). Set CF_WORKER_URL below if used.
+const CF_WORKER_URL = localStorage.getItem('cf_worker_url') || '';
+async function chatProxy(userText){
+  if(!CF_WORKER_URL){
+    return 'Proxy URL not configured. Tap "API via Proxy" only after setting your Worker URL.';
+  }
+  const memory = localStorage.getItem('charlie_mem') || '';
+  const payload = { system: SYSTEM_PROMPT + memory, user: userText };
+  const res = await fetch(CF_WORKER_URL, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+  if(!res.ok) return 'Network problem talking to AI proxy.';
+  const data = await res.json();
+  return data.reply || 'No reply received.';
+}
+
+async function chat(userText){
+  addMsg('you', userText);
+  let reply = '';
+  try {
+    if(backendSel.value === 'proxy') reply = await chatProxy(userText);
+    else reply = await chatWebLLM(userText);
+  } catch(e){ reply = 'I ran into a snag. Please try again.'; console.error(e); }
+  addMsg('ai', reply);
+  window.lastReply = reply; // for speak button
+  return reply;
+}
+
+// ===== Quick buttons =====
+btnSpeak.addEventListener('click', ()=> speak(window.lastReply||'Nothing to say yet.'));
+document.getElementById('btnStop').addEventListener('click', ()=> speechSynthesis.cancel());
+document.getElementById('btnQuick1').addEventListener('click', ()=> chat('Give me today\'s light, positive headline.'));
+document.getElementById('btnQuick2').addEventListener('click', ()=> chat('Tell me a short, clean joke.'));
+document.getElementById('btnQuick3').addEventListener('click', ()=> chat('Please remind me to take my tablets at 8pm every day.'));
+
+document.getElementById('saveMem').addEventListener('click', saveMemory);
+loadMemory();
+
+// Recognizer events
+if(recognizer){
+  recognizer.onresult = (e)=>{
+    const text = e.results[0][0].transcript;
+    chat(text);
+  };
+  recognizer.onerror = (e)=> addMsg('ai', 'I missed that. Try again?');
+}
+
+// First-time greeting
+addMsg('ai', 'Hello! Press and hold the mic to talk. Want a joke, or the headlines?');
+</script>
+</body>
+</html>
